@@ -1,14 +1,19 @@
 {
   "name": "open-cloud-spaces",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A JavaScript and TypeScript client for communicating with the Open Cloud Spaces API.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "git": {
-    "url": "https://github.com/hey-sourav/open-cloud-spaces"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hey-sourav/open-cloud-spaces.git"
   },
+  "bugs": {
+    "url": "https://github.com/hey-sourav/open-cloud-spaces/issues"
+  },
+  "homepage": "https://github.com/hey-sourav/open-cloud-spaces#readme",
   "exports": {
     ".": {
       "import": {
@@ -47,7 +52,7 @@
     "javascript",
     "typescript"
   ],
-  "author": "",
+  "author": "Sourav Bapari (https://github.com/hey-sourav)",
   "license": "ISC",
   "publishConfig": {
     "access": "public"
