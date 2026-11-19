@@ -1,0 +1,63 @@
+{
+  "name": "open-cloud-spaces",
+  "version": "0.1.0",
+  "description": "A JavaScript and TypeScript client for communicating with the Open Cloud Spaces API.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/index.test.mjs test/response.test.mjs test/result.test.mjs && tsc -p test/tsconfig.json",
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run check",
+    "test:integration": "npm run build && node --test test/open-cloud-spaces.integration.test.mjs"
+  },
+  "keywords": [
+    "open-cloud-spaces",
+    "api-client",
+    "axios",
+    "cloud",
+    "spaces",
+    "javascript",
+    "typescript"
+  ],
+  "author": "",
+  "license": "ISC",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsup": "^9.0.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@nodable/entities": "^3.1.0",
+    "axios": "^1.21.1",
+    "fast-xml-parser": "^5.12.1",
+    "fast-xml-validator": "^1.4.4"
+  }
+}
