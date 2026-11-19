@@ -6,6 +6,9 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "git": {
+    "url": "https://github.com/hey-sourav/open-cloud-spaces"
+  },
   "exports": {
     ".": {
       "import": {

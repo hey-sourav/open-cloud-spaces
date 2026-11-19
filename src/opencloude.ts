@@ -156,8 +156,7 @@ function existsAs(
 ): OpenCloudResult<ExistsData> {
   if (!result.success) return result;
   const type = result.data.resource?.type;
-  const found =
-    result.data.exists && (type === kind || type === "unknown");
+  const found = result.data.exists && (type === kind || type === "unknown");
   if (found) return result;
   const missing = failure(
     undefined,
