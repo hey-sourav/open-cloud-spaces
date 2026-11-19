@@ -142,9 +142,9 @@ export async function testOpenCloudSpaces(config, { specialNames = false } = {})
     await assertMissing("Initial file", () => spaces.file.exists(`${folder}/${file}`));
     await request("Upload file", () =>
       spaces.file.upload({
-        folderName: folder,
+        destination: folder,
         fileName: file,
-        fileContent: content,
+        buffer: content,
       }),
     );
     const fileResponse = await request("Check file", () =>
@@ -192,7 +192,7 @@ export async function testOpenCloudSpaces(config, { specialNames = false } = {})
 
     const binary = Buffer.from([0, 255, 128, 13, 10, 1, 254]);
     await request("Upload binary file", () => spaces.file.upload({
-      folderName: renamedFolder, fileName: "binary.bin", fileContent: binary,
+      destination: renamedFolder, fileName: "binary.bin", buffer: binary,
     }));
     const binaryRead = await request("Read binary file", () =>
       spaces.file.read(`${renamedFolder}/binary.bin`),
@@ -204,7 +204,7 @@ export async function testOpenCloudSpaces(config, { specialNames = false } = {})
       ["sample.json", '{"message":"Hello","ok":true}'],
     ]) {
       await request(`Upload ${fileName}`, () => spaces.file.upload({
-        folderName: renamedFolder, fileName, fileContent: Buffer.from(fileContent),
+        destination: renamedFolder, fileName, buffer: Buffer.from(fileContent),
       }));
       const result = await request(`Read ${fileName} original bytes`, () => spaces.file.read(`${renamedFolder}/${fileName}`));
       assert.deepEqual(result, Buffer.from(fileContent));

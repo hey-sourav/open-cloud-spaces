@@ -25,6 +25,18 @@ have completed before a connection failed, so reconcile their state first.
 | `folder.create`, `folder.rename`, `folder.delete` | `{ name, path, type: "folder", previousPath, body }` |
 | `file.upload`, `file.rename`, `file.delete` | `{ name, path, type: "file", previousPath, body }` |
 | `file.read` | Original Node.js Buffer directly (the deliberate exception) |
+| `file.read` with `{ withMetadata: true }` | `{ bytes, resource }`, metadata taken from response headers |
+
+`file.upload()` accepts optional booleans `overwrite` (default `true`) and
+`ensureDestination` (default `false`). With `overwrite: false`, a conditional PUT
+prevents replacing an existing target; HTTP 412 becomes `FILE_ALREADY_EXISTS`
+while preserving the status, request ID, and server error details. Other methods
+retain the generic `PRECONDITION_FAILED` code for HTTP 412.
+
+With `ensureDestination: true`, missing destination folders and their parents are
+created before uploading. Existing folders are reused. A non-folder in the path
+returns `RESOURCE_TYPE_MISMATCH`; folder lookup or creation failures are returned
+without attempting the upload. Folders created before a later failure remain.
 
 `path` is the URL-encoded path relative to the space root, with no leading or
 trailing slash (for example `Reports/hello.txt`). The space root is `""`.
@@ -39,6 +51,14 @@ and `contentType`. Raw WebDAV properties are omitted. Missing values are `null`;
 resolved by URI rather than by a hardcoded prefix. Unknown properties do not add
 fields to the public resource object. The resource path uses the same relative format as mutation paths, independent
 of the server href or space ID. ETags and modification dates retain server formatting.
+
+For `file.read(path, { withMetadata: true })`, `resource` is download metadata
+with `name`, `path`, `extension`, `mimeType`, `charset`, `id`, `size`, `etag`, and
+`lastModified`. The name and extension come from the requested path. Extension
+is lowercase and includes the dot (for example `.txt`), or is `null` when there
+is no extension. `size` is always the actual downloaded byte length. MIME type
+and charset come from `Content-Type`; unavailable header values are `null`.
+This metadata is returned with the bytes without an extra request.
 
 A normal HTTP `404` from `exists()` returns `success: true`, `status: 404`,
 `data: { exists: false, resource: null }`. Permission/authentication/server errors
@@ -165,6 +185,16 @@ if (!result.success) {
   console.log(result.data.resource?.name, result.data.resource?.size);
 }
 const bytes = await spaces.file.read("folder/image.png");
+
+// Include file metadata with the downloaded content.
+const download = await spaces.file.read("Reports/hello.txt", {
+  withMetadata: true,
+});
+console.log(download.bytes.toString("utf8"));
+console.log(download.resource.name);      // "hello.txt"
+console.log(download.resource.extension); // ".txt"
+console.log(download.resource.mimeType);  // e.g. "text/plain"
+console.log(download.resource.size);      // File size in bytes
 ```
 
 ## Verification and practical limits

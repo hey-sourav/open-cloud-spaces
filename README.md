@@ -66,9 +66,9 @@ if (!created.success)
 
 // 2. Upload a file into it.
 await spaces.file.upload({
-  folderName: "Reports",
+  destination: "Reports",
   fileName: "hello.txt",
-  fileContent: Buffer.from("Hello, OpenCloud!"),
+  buffer: Buffer.from("Hello, OpenCloud!"),
 });
 
 // 3. Check that it is there, and read its metadata.
@@ -77,10 +77,16 @@ if (found.success) {
   console.log(found.data.resource?.size, found.data.resource?.contentType);
 }
 
-// 4. Download the bytes. This is the one method that throws.
+// 4. Download the bytes and metadata. This is the one method that throws.
 try {
-  const bytes = await spaces.file.read("Reports/hello.txt");
+  const { bytes, resource } = await spaces.file.read("Reports/hello.txt", {
+    withMetadata: true,
+  });
   console.log(bytes.toString("utf8"));
+  console.log(resource.name);      // "hello.txt"
+  console.log(resource.extension); // ".txt"
+  console.log(resource.mimeType);  // e.g. "text/plain"
+  console.log(resource.size);      // File size in bytes
 } catch (error) {
   if (!(error instanceof OpenCloudError)) throw error;
   console.error(error.code, error.status, error.result.error.message);
@@ -128,13 +134,13 @@ await spaces.folder.exists(""); // ✅ the space root
 ```
 
 `file.upload()` is the single exception, because the file does not exist yet and
-the folder and filename are distinct inputs:
+the destination folder and filename are distinct inputs:
 
 ```ts
 await spaces.file.upload({
-  folderName: "Reports/2026",
+  destination: "Reports/2026",
   fileName: "summary.pdf",
-  fileContent: buffer,
+  buffer: buffer,
 });
 ```
 
@@ -248,21 +254,61 @@ if (found.success) {
 }
 ```
 
-#### `file.upload({ folderName, fileName, fileContent }): Promise<OpenCloudResult<ResourceChange>>`
+#### `file.upload({ destination, fileName, buffer, overwrite?, ensureDestination? }): Promise<OpenCloudResult<ResourceChange>>`
 
-Uploads bytes, creating or overwriting the file. The destination folder must
-already exist.
+Uploads bytes, creating or overwriting the file. `destination` is the folder
+path relative to the space root (use `""` for the root). By default, the destination
+folder must already exist and existing files are overwritten.
 
 ```ts
 await spaces.file.upload({
-  folderName: "Reports",
+  destination: "Reports",
   fileName: "report.pdf",
-  fileContent: await fs.readFile("./report.pdf"),
+  buffer: await fs.readFile("./report.pdf"),
 });
 ```
 
-`fileContent` must be a `Buffer`. Content-Length and a binary content type are
+`buffer` must be a `Buffer`. Content-Length and a binary content type are
 set for you.
+
+To create missing destination folders and protect existing files:
+
+```ts
+const result = await spaces.file.upload({
+  destination: "Reports/2026/November",
+  fileName: "hello.txt",
+  buffer: Buffer.from("Hello, OpenCloud!"),
+  overwrite: false,
+  ensureDestination: true,
+});
+
+if (!result.success) {
+  if (result.error.code === "FILE_ALREADY_EXISTS") {
+    console.log("The file already exists; choose another name.");
+  } else {
+    console.error(result.error.code, result.error.message);
+  }
+}
+```
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `overwrite` | `true` | Set to `false` to reject an upload when the target already exists. |
+| `ensureDestination` | `false` | Set to `true` to check the destination folder and create it and any missing parents before uploading. |
+
+`overwrite: false` sends `If-None-Match: *` with the PUT, so the server checks
+existence atomically, including concurrent uploads. A rejected condition returns
+`success: false`, `status: 412`, and `error.code: "FILE_ALREADY_EXISTS"`.
+This relies on the server honoring HTTP conditional requests
+([HTTP semantics](https://www.rfc-editor.org/rfc/rfc9110.html#name-if-none-match)).
+
+`ensureDestination: true` checks folders from the space root down and creates missing
+ones in order. Existing folders are reused; a file occupying a folder path returns
+`RESOURCE_TYPE_MISMATCH`. Permission, network, or folder-creation failures stop
+the operation before uploading. The space root itself is never created. Folders
+created before a later failure remain in place; the operation is not transactional.
+
+TypeScript consumers can import `UploadOptions` to reuse the options type.
 
 #### `file.read(path): Promise<Buffer>`
 
@@ -280,6 +326,57 @@ try {
 
 Pointing this at a folder throws `RESOURCE_TYPE_MISMATCH` rather than silently
 handing back a directory listing as if it were file content.
+
+To also get the file name, extension, MIME type, and size, pass
+`{ withMetadata: true }` as shown below. Without that option, the result is only
+a `Buffer`.
+
+#### `file.read(path, { withMetadata: true }): Promise<FileDownload>`
+
+Returns the bytes **and** the file's metadata. The metadata comes from the
+download response headers, so this costs **no extra request**.
+The name and extension come from the requested path; size is the actual
+downloaded byte length. MIME type comes from the server's `Content-Type` header
+and may be `null` when that header is unavailable.
+
+```ts
+const { bytes, resource } = await spaces.file.read("Reports/report.pdf", {
+  withMetadata: true,
+});
+
+resource.extension; // ".pdf"
+resource.mimeType; // "application/pdf"
+resource.charset; // "utf-8" for text types, otherwise null
+resource.size; // 51_234 (byte length of the downloaded content)
+resource.etag; // '"abc123"'
+resource.lastModified; // "Thu, 19 Nov 2026 00:00:00 GMT"
+resource.id; // OpenCloud file ID, when the server sends one
+resource.name; // "report.pdf"
+resource.path; // "Reports/report.pdf"
+```
+
+```ts
+interface FileDownload {
+  bytes: Buffer;
+  resource: FileMetadata;
+}
+
+interface FileMetadata {
+  name: string;
+  path: string;
+  extension: string | null; // lowercase, including the dot
+  mimeType: string | null; // media type without parameters
+  charset: string | null;
+  id: string | null;
+  size: number; // always known: the actual byte length
+  etag: string | null;
+  lastModified: string | null;
+}
+```
+
+Use `file.exists()` instead when you want metadata _without_ downloading the
+file, or when you need the `displayname` and resource `type` that only a
+PROPFIND reports.
 
 #### `file.rename(path, newFileName): Promise<OpenCloudResult<ResourceChange>>`
 
@@ -333,6 +430,7 @@ transient cases.
 | `METHOD_NOT_ALLOWED`     | Unsupported operation (405)                          | no        |
 | `CONFLICT`               | Parent missing or target conflict (409)              | no        |
 | `PRECONDITION_FAILED`    | Precondition failed (412)                            | no        |
+| `FILE_ALREADY_EXISTS`    | Upload target exists with `overwrite: false` (412)   | no        |
 | `PAYLOAD_TOO_LARGE`      | Upload exceeds server limits (413)                   | no        |
 | `VALIDATION_ERROR`       | Server rejected the payload (422)                    | no        |
 | `LOCKED`                 | Resource is locked (423)                             | no        |
@@ -342,7 +440,7 @@ transient cases.
 | `HTTP_ERROR`             | Unmapped 4xx                                         | no        |
 | `NETWORK_ERROR`          | Connection failed                                    | **yes**   |
 | `CANCELED`               | Request was canceled                                 | no        |
-| `RESOURCE_TYPE_MISMATCH` | `file.read()` targeted a folder                      | no        |
+| `RESOURCE_TYPE_MISMATCH` | Wrong resource kind for a read or upload folder path | no        |
 | `PARTIAL_FAILURE`        | A `207` reported a failed child operation            | no        |
 | `INVALID_RESPONSE`       | Unparseable or ambiguous server body                 | no        |
 
@@ -435,6 +533,8 @@ import type {
   OpenCloudErrorDetails,
   OpenCloudWarning,
   ExistsData,
+  FileDownload,
+  FileMetadata,
   ResourceMetadata,
   ResourceChange,
   JsonData,

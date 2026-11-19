@@ -14,8 +14,12 @@ import {
   conversionFailure,
   failure,
   httpFailure,
+  responseHeader,
   success,
+  type FileDownload,
+  type FileMetadata,
   type OpenCloudResult,
+  type OpenCloudFailure,
   type ResourceChange,
   type ExistsData,
 } from "./result.js";
@@ -44,6 +48,17 @@ function spaceRelativePath(folder: string, file?: string) {
 function resourcePath(space: string, folder: string, file?: string) {
   const relative = spaceRelativePath(folder, file);
   return `/dav/spaces/${encodeURIComponent(space)}${relative ? `/${relative}` : ""}`;
+}
+
+export interface UploadOptions {
+  /** Destination folder relative to the space root; "" means root. */
+  destination: string;
+  fileName: string;
+  buffer: Buffer;
+  /** Replace an existing file. Defaults to true. */
+  overwrite?: boolean;
+  /** Check the destination and create missing folders, including parents, before uploading. Defaults to false. */
+  ensureDestination?: boolean;
 }
 export class OpenCloudSpaces {
   private client: AxiosInstance;
@@ -116,6 +131,31 @@ async function execute<T>(
       return success(error.response, missing);
     return axiosFailure(error);
   }
+}
+
+/** Project download metadata from response headers, avoiding a second request. */
+function fileMetadata(
+  response: AxiosResponse<Buffer>,
+  filePath: string,
+): FileMetadata {
+  const name = filePath.split("/").filter(Boolean).at(-1) ?? "";
+  const dot = name.lastIndexOf(".");
+  const contentType = responseContentType(response.headers);
+  const [media, ...parameters] = contentType.split(";");
+  const charset = parameters
+    .map((parameter) => /^\s*charset\s*=\s*"?([^";]+)"?/i.exec(parameter)?.[1])
+    .find((value) => value !== undefined);
+  return {
+    name,
+    path: spaceRelativePath(filePath),
+    extension: dot > 0 ? name.slice(dot).toLowerCase() : null,
+    mimeType: media?.trim() ? media.trim().toLowerCase() : null,
+    charset: charset?.trim().toLowerCase() ?? null,
+    id: responseHeader(response, "oc-fileid"),
+    size: response.data.length,
+    etag: responseHeader(response, "etag"),
+    lastModified: responseHeader(response, "last-modified"),
+  };
 }
 
 const DIRECTORY_CONTENT_TYPE = "httpd/unix-directory";
@@ -235,7 +275,15 @@ class OpenCloudFile {
   ) {}
 
   /** Download original file bytes; failures throw OpenCloudError with a JSON result. */
-  async read(filePath: string): Promise<Buffer> {
+  read(filePath: string): Promise<Buffer>;
+  read(
+    filePath: string,
+    options: { withMetadata: true },
+  ): Promise<FileDownload>;
+  async read(
+    filePath: string,
+    options?: { withMetadata?: boolean },
+  ): Promise<Buffer | FileDownload> {
     try {
       const response = await this.client.request<Buffer>({
         method: "GET",
@@ -253,7 +301,9 @@ class OpenCloudFile {
           ),
         );
       }
-      return response.data;
+      return options?.withMetadata
+        ? { bytes: response.data, resource: fileMetadata(response, filePath) }
+        : response.data;
     } catch (error) {
       if (error instanceof OpenCloudError) throw error;
       if (!isAxiosError<JsonData>(error)) throw error;
@@ -261,16 +311,68 @@ class OpenCloudFile {
     }
   }
 
-  upload({
-    fileContent,
+  async upload({
+    buffer,
     fileName,
-    folderName,
-  }: {
-    folderName: string;
-    fileName: string;
-    fileContent: Buffer;
-  }): Promise<OpenCloudResult<ResourceChange>> {
-    return this.change("PUT", folderName, fileName, undefined, fileContent);
+    destination,
+    overwrite = true,
+    ensureDestination = false,
+  }: UploadOptions): Promise<OpenCloudResult<ResourceChange>> {
+    // Validate the complete path before creating any folders.
+    resourcePath(this.space, destination, fileName);
+    if (ensureDestination) {
+      const failed = await this.ensureDestination(destination);
+      if (failed) return failed;
+    }
+    const result = await this.change(
+      "PUT", destination, fileName, undefined, buffer, overwrite,
+    );
+    if (!overwrite && !result.success && result.status === 412) {
+      return {
+        ...result,
+        error: {
+          ...result.error,
+          code: "FILE_ALREADY_EXISTS",
+          message: `A resource already exists at '${spaceRelativePath(destination, fileName)}'; overwrite is disabled.`,
+        },
+      };
+    }
+    return result;
+  }
+
+  private async ensureDestination(
+    destination: string,
+  ): Promise<OpenCloudFailure | null> {
+    const segments = destination.split("/").filter(Boolean);
+    const folders = new OpenCloudFolder(this.client, this.space);
+    for (let index = 0; index < segments.length; index++) {
+      const path = segments.slice(0, index + 1).join("/");
+      let found = await propfind(this.client, this.space, path);
+      if (!found.success) return found;
+      if (!found.data.exists) {
+        const created = await folders.create(path);
+        if (created.success) continue;
+        // Another client may have created the folder after our existence check.
+        if (created.status !== 405 && created.status !== 409) return created;
+        found = await propfind(this.client, this.space, path);
+        if (!found.success) return found;
+        if (!found.data.exists) return created;
+      }
+      if (found.data.resource?.type !== "folder") {
+        return {
+          ...found,
+          success: false as const,
+          data: null,
+          error: {
+            code: "RESOURCE_TYPE_MISMATCH",
+            message: `Expected a folder at '${spaceRelativePath(path)}'.`,
+            retryable: false,
+            details: { expected: "folder", actual: found.data.resource?.type ?? null },
+          },
+        };
+      }
+    }
+    return null;
   }
 
   delete(filePath: string): Promise<OpenCloudResult<ResourceChange>> {
@@ -296,6 +398,7 @@ class OpenCloudFile {
     fileName?: string,
     newName?: string,
     content?: Buffer,
+    overwrite = true,
   ): Promise<OpenCloudResult<ResourceChange>> {
     const path = resourcePath(this.space, folderName, fileName);
     const parentFolder =
@@ -315,6 +418,7 @@ class OpenCloudFile {
           ? {
               "Content-Length": String(content!.length),
               "Content-Type": "application/octet-stream",
+              ...(!overwrite ? { "If-None-Match": "*" } : {}),
             }
           : {};
     return execute(

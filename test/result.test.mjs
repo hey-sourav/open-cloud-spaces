@@ -20,7 +20,7 @@ const operations = [
   ['folder.create', (s) => s.folder.create('Reports'), 'folder', 'Reports', null],
   ['folder.rename', (s) => s.folder.rename('Reports', 'Renamed'), 'folder', 'Renamed', 'Reports'],
   ['folder.delete', (s) => s.folder.delete('Reports'), 'folder', 'Reports', null],
-  ['file.upload', (s) => s.file.upload({ folderName: 'Reports', fileName: 'hello.txt', fileContent: Buffer.from('hello') }), 'file', 'Reports/hello.txt', null],
+  ['file.upload', (s) => s.file.upload({ destination: 'Reports', fileName: 'hello.txt', buffer: Buffer.from('hello') }), 'file', 'Reports/hello.txt', null],
   ['file.rename', (s) => s.file.rename('Reports/hello.txt', 'new.txt'), 'file', 'Reports/new.txt', 'Reports/hello.txt'],
   ['file.delete', (s) => s.file.delete('Reports/hello.txt'), 'file', 'Reports/hello.txt', null],
 ];

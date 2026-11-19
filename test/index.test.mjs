@@ -8,6 +8,107 @@ function client() {
   return new OpenCloudSpaces({ base_url: "https://example.invalid", user: "admin", token: "test-token", space: "space$root" });
 }
 
+function uploadServer(spaces, respond) {
+  const calls = [];
+  spaces.client.defaults.adapter = async (config) => {
+    calls.push(config);
+    const { status = 201, data = "" } = respond(config, calls);
+    const response = { config, status, statusText: String(status), headers: { "x-request-id": "upload-test" }, data: Buffer.from(data) };
+    if (status >= 400) throw new axios.AxiosError("Request failed", "ERR_BAD_RESPONSE", config, null, response);
+    return response;
+  };
+  return calls;
+}
+
+function folderProperties(url, folder = true) {
+  return { status: 207, data: `<d:multistatus xmlns:d="DAV:"><d:response><d:href>${url}</d:href><d:propstat><d:prop><d:resourcetype>${folder ? "<d:collection/>" : ""}</d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>` };
+}
+
+test("overwrite false uses an atomic conditional PUT and reports an existing target", async () => {
+  const spaces = client();
+  const calls = uploadServer(spaces, () => ({ status: 412, data: "existing target" }));
+  const result = await spaces.file.upload({ destination: "Reports", fileName: "hello.txt", buffer: Buffer.from("hello"), overwrite: false });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "put");
+  assert.equal(calls[0].headers.get("If-None-Match"), "*");
+  assert.equal(result.success, false);
+  assert.equal(result.status, 412);
+  assert.equal(result.error.code, "FILE_ALREADY_EXISTS");
+  assert.match(result.error.message, /Reports\/hello.txt/);
+  assert.equal(result.requestId, "upload-test");
+  assert.equal(result.error.details.content, "existing target");
+});
+
+test("overwrite defaults to true and conditional uploads can create new files", async () => {
+  const spaces = client();
+  const calls = uploadServer(spaces, () => ({}));
+  for (const options of [{}, { overwrite: true }, { overwrite: false }]) {
+    const result = await spaces.file.upload({ destination: "Reports", fileName: "hello.txt", buffer: Buffer.from("hello"), ...options });
+    assert.equal(result.success, true);
+  }
+  assert.deepEqual(calls.map(call => call.headers.get("If-None-Match")), [undefined, undefined, "*"]);
+  assert.ok(calls.every(call => call.method === "put"));
+});
+
+test("ensureDestination creates nested missing folders before the conditional upload", async () => {
+  const spaces = client();
+  const calls = uploadServer(spaces, config => config.method === "propfind" ? { status: 404 } : {});
+  const result = await spaces.file.upload({ destination: "Reports/नमस्ते #", fileName: "hello.txt", buffer: Buffer.from("hello"), ensureDestination: true, overwrite: false });
+  const root = "/dav/spaces/space%24root/Reports";
+  const nested = root + "/" + encodeURIComponent("नमस्ते #");
+  assert.equal(result.success, true);
+  assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
+    ["propfind", root], ["mkcol", root], ["propfind", nested], ["mkcol", nested], ["put", nested + "/hello.txt"],
+  ]);
+  assert.equal(calls.at(-1).headers.get("If-None-Match"), "*");
+});
+
+test("ensureDestination reuses existing folders and never creates the space root", async () => {
+  const spaces = client();
+  const calls = uploadServer(spaces, config => config.method === "propfind" ? folderProperties(config.url) : {});
+  for (const destination of ["Reports/2026", ""]) {
+    assert.equal((await spaces.file.upload({ destination, fileName: "hello.txt", buffer: Buffer.from("hello"), ensureDestination: true })).success, true);
+  }
+  assert.deepEqual(calls.map(call => call.method), ["propfind", "propfind", "put", "put"]);
+});
+
+test("folder failures and file-in-parent conflicts prevent uploading", async () => {
+  for (const scenario of ["permission", "creation", "file", "unconfirmed"]) {
+    const spaces = client();
+    const calls = uploadServer(spaces, config => {
+      if (config.method === "mkcol") return { status: scenario === "creation" ? 403 : 405 };
+      if (scenario === "permission") return { status: 403 };
+      if (scenario === "file") return folderProperties(config.url, false);
+      return { status: 404 };
+    });
+    const result = await spaces.file.upload({ destination: "Reports/2026", fileName: "hello.txt", buffer: Buffer.from("hello"), ensureDestination: true });
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, scenario === "file" ? "RESOURCE_TYPE_MISMATCH" : scenario === "unconfirmed" ? "METHOD_NOT_ALLOWED" : "FORBIDDEN");
+    assert.ok(calls.every(call => call.method !== "put"));
+  }
+});
+
+test("concurrent folder creation is accepted only after verifying the folder", async () => {
+  for (const status of [405, 409]) {
+    const spaces = client();
+    let checks = 0;
+    const calls = uploadServer(spaces, config => {
+      if (config.method === "propfind") return ++checks === 1 ? { status: 404 } : folderProperties(config.url);
+      return { status: config.method === "mkcol" ? status : 201 };
+    });
+    const result = await spaces.file.upload({ destination: "Reports", fileName: "hello.txt", buffer: Buffer.from("hello"), ensureDestination: true });
+    assert.equal(result.success, true);
+    assert.deepEqual(calls.map(call => call.method), ["propfind", "mkcol", "propfind", "put"]);
+  }
+});
+
+test("invalid destinations do not create folders or upload", async () => {
+  const spaces = client();
+  const calls = uploadServer(spaces, () => ({}));
+  await assert.rejects(spaces.file.upload({ destination: "Reports/../other", fileName: "hello.txt", buffer: Buffer.from("hello"), ensureDestination: true }), TypeError);
+  assert.equal(calls.length, 0);
+});
+
 test("ESM and CommonJS consumers can construct the client", () => {
   const require = createRequire(import.meta.url);
   assert.ok(new (require("open-cloud-spaces").OpenCloudSpaces)({ base_url: "https://example.invalid", user: "admin", token: "test-token", space: "space" }).folder);
@@ -32,7 +133,7 @@ test("all nine API methods use the correct method, path, authentication and head
   await spaces.folder.rename(folder, "new #folder");
   await spaces.folder.delete(folder);
   await spaces.file.exists(`${folder}/${file}`);
-  await spaces.file.upload({ folderName: folder, fileName: file, fileContent: Buffer.from("hello") });
+  await spaces.file.upload({ destination: folder, fileName: file, buffer: Buffer.from("hello") });
   assert.deepEqual(await spaces.file.read(`${folder}/${file}`), Buffer.from("hello"));
   await spaces.file.rename(`${folder}/${file}`, renamed);
   await spaces.file.delete(`${folder}/${file}`);
@@ -190,4 +291,54 @@ test("file paths are not mistaken for folders by folder.exists()", async () => {
   assert.equal(asFolder.success, false);
   assert.deepEqual(asFolder.error.details, { expected: "folder", actual: "file" });
   assert.equal((await spaces.file.exists("hello/test.txt")).data.exists, true);
+});
+
+test("read() exposes response-header metadata without a second request", async () => {
+  const spaces = client();
+  const bytes = Buffer.from("hello world");
+  const calls = [];
+  spaces.client.defaults.adapter = async (config) => {
+    calls.push(config.method);
+    return {
+      config, status: 200, statusText: "OK", data: bytes,
+      headers: {
+        "content-type": 'text/plain; charset="UTF-8"',
+        etag: '"abc123"',
+        "last-modified": "Thu, 19 Nov 2026 00:00:00 GMT",
+        "oc-fileid": "00123",
+      },
+    };
+  };
+
+  const plain = await spaces.file.read("Reports/Hello.TXT");
+  assert.ok(Buffer.isBuffer(plain));
+
+  const { bytes: data, resource } = await spaces.file.read("Reports/Hello.TXT", { withMetadata: true });
+  assert.strictEqual(data, bytes);
+  assert.deepEqual(resource, {
+    name: "Hello.TXT",
+    path: "Reports/Hello.TXT",
+    extension: ".txt",
+    mimeType: "text/plain",
+    charset: "utf-8",
+    id: "00123",
+    size: 11,
+    etag: '"abc123"',
+    lastModified: "Thu, 19 Nov 2026 00:00:00 GMT",
+  });
+  assert.deepEqual(calls, ["get", "get"], "metadata must not cost an extra request");
+});
+
+test("download metadata degrades gracefully for extensionless files and bare content types", async () => {
+  const spaces = client();
+  spaces.client.defaults.adapter = async (config) => ({
+    config, status: 200, statusText: "OK", data: Buffer.from(""),
+    headers: { "content-type": "application/octet-stream" },
+  });
+  const { resource } = await spaces.file.read("Reports/.gitignore", { withMetadata: true });
+  assert.equal(resource.extension, null, "a leading dot is not an extension");
+  assert.equal(resource.mimeType, "application/octet-stream");
+  assert.equal(resource.charset, null);
+  assert.equal(resource.size, 0);
+  for (const key of ["id", "etag", "lastModified"]) assert.equal(resource[key], null);
 });
