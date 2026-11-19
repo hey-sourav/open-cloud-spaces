@@ -1,4 +1,4 @@
-import { OpenCloudSpaces, type FileDownload, type UploadOptions } from "open-cloud-spaces";
+import { OpenCloudSpaces, type FileDownload, type UploadOptions, type ResourceMetadata } from "open-cloud-spaces";
 const spaces = new OpenCloudSpaces({ base_url: "https://example.invalid", user: "admin", token: "token", space: "space" });
 void spaces.folder.exists("folder");
 void spaces.folder.create("folder");
@@ -14,6 +14,11 @@ void spaces.file.upload({ ...uploadOptions, ensureDestination: "true" });
 const bytes: Buffer = await spaces.file.read("folder/file");
 void bytes;
 void spaces.file.exists("folder/file");
+const stat = await spaces.file.stat("folder/file");
+if (stat.success) {
+  const metadata: ResourceMetadata = stat.data;
+  void metadata;
+}
 void spaces.file.rename("folder/old", "new");
 void spaces.file.delete("folder/file");
 // @ts-expect-error Uploads require a Buffer.

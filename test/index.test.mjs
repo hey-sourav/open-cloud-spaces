@@ -187,8 +187,9 @@ test("missing resources and authentication errors propagate with status and body
       const result = await operation();
       assert.equal(result.status, status);
       if (status === 404) {
-        assert.equal(result.success, false);
-        assert.equal(result.error.code, 'NOT_FOUND');
+        assert.equal(result.success, true);
+        assert.deepEqual(result.data, { exists: false, resource: null });
+        assert.equal(result.error, null);
       } else {
         assert.equal(result.success, false);
         assert.equal(result.error.details.content, "server error body");
@@ -267,9 +268,9 @@ test("folder paths are not mistaken for files by exists() or read()", async () =
       : { config, status: 200, statusText: "OK", headers: { "content-type": "httpd/unix-directory" }, data: Buffer.from("listing") };
 
   const asFile = await spaces.file.exists("hello/test");
-  assert.equal(asFile.success, false);
-  assert.equal(asFile.error.code, "NOT_FOUND");
-  assert.deepEqual(asFile.error.details, { expected: "file", actual: "folder" });
+  assert.equal(asFile.success, true);
+  assert.deepEqual(asFile.data, { exists: false, resource: null });
+  assert.equal(asFile.error, null);
 
   const asFolder = await spaces.folder.exists("hello/test");
   assert.equal(asFolder.success, true);
@@ -288,8 +289,8 @@ test("file paths are not mistaken for folders by folder.exists()", async () => {
   const body = '<d:multistatus xmlns:d="DAV:"><d:response><d:href>/dav/spaces/space%24root/hello/test.txt</d:href><d:propstat><d:prop><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>';
   spaces.client.defaults.adapter = async (config) => ({ config, status: 207, statusText: "Multi-Status", headers: { "content-type": "application/xml" }, data: Buffer.from(body) });
   const asFolder = await spaces.folder.exists("hello/test.txt");
-  assert.equal(asFolder.success, false);
-  assert.deepEqual(asFolder.error.details, { expected: "folder", actual: "file" });
+  assert.equal(asFolder.success, true);
+  assert.deepEqual(asFolder.data, { exists: false, resource: null });
   assert.equal((await spaces.file.exists("hello/test.txt")).data.exists, true);
 });
 

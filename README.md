@@ -187,13 +187,33 @@ if (result.success) {
 }
 ```
 
-**`success` reflects the operation's outcome, not merely a completed request.**
-An existence check on a missing path is a `NOT_FOUND` _failure_, not a success
-carrying `exists: false`.
+An existence check succeeds even when the resource is absent: check
+`result.data.exists` after checking `result.success`. Missing resources return
+`{ exists: false, resource: null }`; permission, network, and server errors remain
+failures. An existence check does not guarantee the resource will still exist
+when a later operation runs.
 
 `file.read()` is the deliberate exception: it returns a `Buffer` directly and
 rejects with `OpenCloudError` on failure. That error carries the identical
 failure object on `error.result`, plus `error.code` and `error.status` shortcuts.
+
+### Missing resources
+
+| Method | Behavior when absent |
+| --- | --- |
+| `file.exists()`, `folder.exists()` | Resolves with `success: true`, `data: { exists: false, resource: null }`, and `error: null`. |
+| `file.read()` (with or without metadata) | Rejects with `OpenCloudError` whose `code` is `NOT_FOUND`. |
+| `file.stat()` | Resolves with `success: false`, `data: null`, and `error.code: "NOT_FOUND"`. |
+| `file.delete()`, `folder.delete()` | Resolves with a `NOT_FOUND` failure; absence is not treated as a successful deletion. |
+
+`status` preserves the server's HTTP status: normally `404` for absence, or `207`
+when an existence/stat response contains a resource-level `404` inside WebDAV
+multi-status. Property-level failures do not establish absence; they produce
+metadata warnings or `INVALID_RESPONSE` if existence cannot be determined.
+
+**Migration:** `exists()` previously returned `NOT_FOUND` failures for missing
+resources or the other resource kind. Now use `result.success && !result.data.exists`
+to detect a negative check.
 
 ## API reference
 
@@ -201,20 +221,19 @@ failure object on `error.result`, plus `error.code` and `error.status` shortcuts
 
 #### `folder.exists(path): Promise<OpenCloudResult<ExistsData>>`
 
-Succeeds only when a **folder** exists at `path`.
+Checks whether a **folder** exists at `path`.
 
 ```ts
 const result = await spaces.folder.exists("Reports");
 if (result.success) {
-  console.log(result.data.exists); // true
-  console.log(result.data.resource?.type); // "folder"
+  console.log(result.data.exists); // true or false
+  console.log(result.data.resource?.type); // "folder" when present
 }
 ```
 
-Fails with `NOT_FOUND` when nothing is there, **and also when a file occupies the
-path** — a WebDAV path alone cannot distinguish the two, so the client checks the
-reported resource type. In the mismatch case `error.details` is
-`{ expected: "folder", actual: "file" }`.
+Returns `success: true` with `exists: false` and `resource: null` when nothing is
+there or a file occupies the path. If the server omits the resource type, a
+present resource is returned with type `"unknown"` and a warning.
 
 #### `folder.create(path): Promise<OpenCloudResult<ResourceChange>>`
 
@@ -237,22 +256,44 @@ console.log(renamed.data?.previousPath); // "Reports/2025"
 #### `folder.delete(path): Promise<OpenCloudResult<ResourceChange>>`
 
 Deletes the folder **and its contents**. A successful delete typically returns
-HTTP `204` with `data.body` as `{}`.
+HTTP `204` with `data.body` as `{}`. A missing folder returns a `NOT_FOUND` failure.
 
 ### File methods
 
 #### `file.exists(path): Promise<OpenCloudResult<ExistsData>>`
 
-Succeeds only when a **file** exists at `path`; a folder at that path fails with
-`NOT_FOUND` and `error.details` of `{ expected: "file", actual: "folder" }`.
+Checks whether a **file** exists at `path`. A missing path or a folder at that
+path returns `success: true`, `exists: false`, and `resource: null`. If the server
+omits the resource type, a present resource is returned with type `"unknown"`
+and a warning.
 
 ```ts
 const found = await spaces.file.exists("Reports/hello.txt");
-if (found.success) {
+if (found.success && found.data.exists) {
   const { name, size, etag, lastModified, contentType, id } =
     found.data.resource!;
 }
 ```
+
+#### `file.stat(path): Promise<OpenCloudResult<ResourceMetadata>>`
+
+Returns file metadata without downloading content, using one PROPFIND request.
+Unlike `exists()`, a missing file returns a `NOT_FOUND` failure. A folder at the
+path returns `RESOURCE_TYPE_MISMATCH`. Permission, network, and server errors
+remain failures; unavailable metadata properties produce warnings.
+
+```ts
+const result = await spaces.file.stat("Reports/hello.txt");
+if (result.success) {
+  console.log(result.data.name, result.data.size, result.data.contentType);
+} else {
+  console.error(result.error.code, result.error.message);
+}
+```
+
+`stat()` returns `ResourceMetadata` with `contentType` (the server's full content
+type), rather than the download-only `FileMetadata` fields `mimeType`, `charset`,
+and `extension`. Size may be `null` when the server does not provide a usable value.
 
 #### `file.upload({ destination, fileName, buffer, overwrite?, ensureDestination? }): Promise<OpenCloudResult<ResourceChange>>`
 
@@ -374,13 +415,15 @@ interface FileMetadata {
 }
 ```
 
-Use `file.exists()` instead when you want metadata _without_ downloading the
-file, or when you need the `displayname` and resource `type` that only a
-PROPFIND reports.
+Use `file.stat()` for metadata without downloading the file, or `file.exists()`
+when absence should be a successful negative check. Both use PROPFIND to obtain
+the server's display name and resource type.
 
 #### `file.rename(path, newFileName): Promise<OpenCloudResult<ResourceChange>>`
 
 #### `file.delete(path): Promise<OpenCloudResult<ResourceChange>>`
+
+A missing file returns `success: false` with `error.code: "NOT_FOUND"`.
 
 ### Returned data shapes
 
@@ -423,7 +466,7 @@ transient cases.
 
 | Code                     | Meaning                                              | Retryable |
 | ------------------------ | ---------------------------------------------------- | --------- |
-| `NOT_FOUND`              | Missing resource, or present as the other kind (404) | no        |
+| `NOT_FOUND`              | Required resource is missing; `exists()` returns false instead | no        |
 | `BAD_REQUEST`            | Malformed request (400)                              | no        |
 | `UNAUTHORIZED`           | Bad or expired credentials (401)                     | no        |
 | `FORBIDDEN`              | Authenticated but not permitted (403)                | no        |
@@ -440,7 +483,7 @@ transient cases.
 | `HTTP_ERROR`             | Unmapped 4xx                                         | no        |
 | `NETWORK_ERROR`          | Connection failed                                    | **yes**   |
 | `CANCELED`               | Request was canceled                                 | no        |
-| `RESOURCE_TYPE_MISMATCH` | Wrong resource kind for a read or upload folder path | no        |
+| `RESOURCE_TYPE_MISMATCH` | Wrong resource kind for a read, stat, or upload folder path | no        |
 | `PARTIAL_FAILURE`        | A `207` reported a failed child operation            | no        |
 | `INVALID_RESPONSE`       | Unparseable or ambiguous server body                 | no        |
 
@@ -476,10 +519,10 @@ if (result.success && result.warnings.length) {
 
 ```ts
 const found = await spaces.folder.exists("Reports");
-if (!found.success && found.error.code === "NOT_FOUND") {
+if (found.success && !found.data.exists) {
   await spaces.folder.create("Reports");
 } else if (!found.success) {
-  throw new Error(found.error.message); // a real failure, not just "absent"
+  throw new Error(found.error.message);
 }
 ```
 

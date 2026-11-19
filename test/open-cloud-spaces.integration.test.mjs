@@ -118,8 +118,9 @@ export async function testOpenCloudSpaces(config, { specialNames = false } = {})
     expectedStatuses = [404];
     try {
       const result = await operation();
-      assert.equal(result.success, false, `${label}: resource still exists`);
-      assert.equal(result.error.code, "NOT_FOUND", `${label}: ${JSON.stringify(result.error)}`);
+      assert.equal(result.success, true, `${label}: ${JSON.stringify(result.error)}`);
+      assert.deepEqual(result.data, { exists: false, resource: null }, `${label}: resource still exists`);
+      assert.equal(result.error, null);
       assert.equal(result.status, 404);
     } catch (error) {
       // File reads return bytes and throw a typed error when the file is absent.

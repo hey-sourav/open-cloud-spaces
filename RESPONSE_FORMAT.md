@@ -21,7 +21,8 @@ have completed before a connection failed, so reconcile their state first.
 
 | Method | Successful data |
 | --- | --- |
-| `folder.exists`, `file.exists` | `{ exists, resource }` on success; `NOT_FOUND` failure when absent or the other kind |
+| `folder.exists`, `file.exists` | `{ exists, resource }`; absence or the other resource kind returns `{ exists: false, resource: null }` successfully |
+| `file.stat` | File `ResourceMetadata` directly in `data`; absence returns a `NOT_FOUND` failure |
 | `folder.create`, `folder.rename`, `folder.delete` | `{ name, path, type: "folder", previousPath, body }` |
 | `file.upload`, `file.rename`, `file.delete` | `{ name, path, type: "file", previousPath, body }` |
 | `file.read` | Original Node.js Buffer directly (the deliberate exception) |
@@ -72,6 +73,20 @@ explicit metadata warnings. A mutation's `207` is inspected separately: any
 reported failed child operation produces `PARTIAL_FAILURE`, retaining the outer
 HTTP status and full converted details. Do not retry an entire partially completed
 operation without first checking its state.
+
+`file.exists()` on a known folder and `folder.exists()` on a known file also
+return successful negative checks with `resource: null`. Unknown resource types
+remain present with a warning. Check both `success` and `data.exists` before
+using existence metadata.
+
+`file.stat()` reads metadata through PROPFIND without downloading content and
+returns it directly in `data`. A missing file returns a `NOT_FOUND` failure;
+a folder target returns `RESOURCE_TYPE_MISMATCH`. As with `exists()`, the outer
+HTTP status, request ID, and property warnings are preserved, including `207`
+when absence is reported by a resource-level `404` inside multi-status.
+`file.read()` (including metadata mode) rejects with `OpenCloudError` and code
+`NOT_FOUND` for missing files. `file.delete()` and `folder.delete()` return a
+`NOT_FOUND` failure when the server reports absence.
 
 HTTP and network failures resolve to failure results for JSON methods. Failed
 `file.read()` calls reject with exported `OpenCloudError`: use `error.result`

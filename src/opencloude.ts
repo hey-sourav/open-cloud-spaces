@@ -22,6 +22,7 @@ import {
   type OpenCloudFailure,
   type ResourceChange,
   type ExistsData,
+  type ResourceMetadata,
 } from "./result.js";
 import { existsResult, mutationResult } from "./webdav.js";
 
@@ -122,6 +123,8 @@ async function execute<T>(
 ): Promise<OpenCloudResult<T>> {
   try {
     const response = await client.request<JsonData>(config);
+    if (missing !== undefined && response.status === 404)
+      return success(response, missing);
     if (response.status < 200 || response.status >= 300)
       return httpFailure(response);
     return conversionFailure(response) ?? project(response);
@@ -184,32 +187,16 @@ function propfind(
   );
 }
 
-/**
- * `success` reflects the operation's outcome, so a resource that is absent — or
- * present as the other kind, which a WebDAV path alone cannot distinguish — is a
- * NOT_FOUND failure rather than a successful "exists: false".
- */
+/** Absence or a known different resource kind is a successful negative check. */
 function existsAs(
   kind: "file" | "folder",
-  relativePath: string,
   result: OpenCloudResult<ExistsData>,
 ): OpenCloudResult<ExistsData> {
   if (!result.success) return result;
   const type = result.data.resource?.type;
   const found = result.data.exists && (type === kind || type === "unknown");
   if (found) return result;
-  const missing = failure(
-    undefined,
-    "NOT_FOUND",
-    result.data.exists
-      ? `Expected a ${kind} at '${relativePath}', but the server reported a ${type}.`
-      : `No ${kind} exists at '${relativePath}'.`,
-    result.data.exists ? { expected: kind, actual: type ?? null } : null,
-  );
-  missing.status = result.status;
-  missing.requestId = result.requestId;
-  missing.warnings = result.warnings;
-  return missing;
+  return { ...result, data: { exists: false, resource: null } };
 }
 
 class OpenCloudFolder {
@@ -220,7 +207,7 @@ class OpenCloudFolder {
 
   exists(folderName: string): Promise<OpenCloudResult<ExistsData>> {
     return propfind(this.client, this.space, folderName).then((result) =>
-      existsAs("folder", spaceRelativePath(folderName), result),
+      existsAs("folder", result),
     );
   }
 
@@ -388,8 +375,33 @@ class OpenCloudFile {
 
   exists(filePath: string): Promise<OpenCloudResult<ExistsData>> {
     return propfind(this.client, this.space, filePath).then((result) =>
-      existsAs("file", spaceRelativePath(filePath), result),
+      existsAs("file", result),
     );
+  }
+
+  /** Read file metadata without downloading content; absence returns NOT_FOUND. */
+  async stat(filePath: string): Promise<OpenCloudResult<ResourceMetadata>> {
+    const result = await propfind(this.client, this.space, filePath);
+    if (!result.success) return result;
+    const resource = result.data.resource;
+    if (result.data.exists && resource && resource.type !== "folder") {
+      return { ...result, data: resource };
+    }
+    const mismatch = result.data.exists;
+    const failed = failure(
+      undefined,
+      mismatch ? "RESOURCE_TYPE_MISMATCH" : "NOT_FOUND",
+      mismatch
+        ? `Expected a file at '${spaceRelativePath(filePath)}', but the server reported a folder.`
+        : `No file exists at '${spaceRelativePath(filePath)}'.`,
+      mismatch ? { expected: "file", actual: resource?.type ?? null } : null,
+    );
+    return {
+      ...failed,
+      status: result.status,
+      requestId: result.requestId,
+      warnings: result.warnings,
+    };
   }
 
   private change(

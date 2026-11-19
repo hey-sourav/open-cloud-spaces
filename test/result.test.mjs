@@ -82,14 +82,13 @@ test('optional property failures appear as warnings rather than missing resource
   assert.deepEqual(result.warnings, [{ code: 'PROPERTY_UNAVAILABLE', message: 'A WebDAV property could not be retrieved.', status: 404, property: 'oc:has-preview' }]);
 });
 
-test('missing paths fail with NOT_FOUND for both exists methods', async () => {
+test('missing paths return a successful negative check for both exists methods', async () => {
   const spaces = client(); mock(spaces, 404, '<d:error xmlns:d="DAV:"><message>Not found</message></d:error>', { 'oc-request-id': 'not-found-1' });
   for (const result of [await spaces.folder.exists('missing'), await spaces.file.exists('folder/missing')]) {
-    assert.equal(result.success, false);
+    assert.equal(result.success, true);
     assert.equal(result.status, 404);
-    assert.equal(result.data, null);
-    assert.equal(result.error.code, 'NOT_FOUND');
-    assert.equal(result.error.retryable, false);
+    assert.deepEqual(result.data, { exists: false, resource: null });
+    assert.equal(result.error, null);
     assert.equal(result.requestId, 'not-found-1');
   }
 });
@@ -100,9 +99,94 @@ test('207 resource-level failures remain distinguishable from property-level war
     mock(spaces, 207, multistatus(`<d:response><d:href>/folder</d:href><d:status>HTTP/1.1 ${code} Error</d:status></d:response>`));
     const result = await spaces.folder.exists('folder');
     assert.equal(result.status, 207);
-    if (code === 404) { assert.equal(result.success, false); assert.equal(result.error.code, 'NOT_FOUND'); assert.equal(result.data, null); }
+    if (code === 404) { assert.equal(result.success, true); assert.equal(result.error, null); assert.deepEqual(result.data, { exists: false, resource: null }); }
     else { assert.equal(result.success, false); assert.equal(result.error.code, 'FORBIDDEN'); assert.equal(result.error.details.status, 403); }
   }
+});
+
+test('stat returns file metadata using one PROPFIND and no download', async () => {
+  const spaces = client();
+  const calls = [];
+  spaces.client.defaults.adapter = async config => {
+    calls.push(config);
+    return { config, status: 207, statusText: 'Multi-Status', headers: { 'x-request-id': 'stat-1' }, data: Buffer.from(multistatus(entry('/dav/spaces/space/Reports/hello.txt', { name: 'hello.txt' }))) };
+  };
+  const result = await spaces.file.stat('Reports/hello.txt');
+  assert.equal(result.success, true);
+  assert.equal(result.data.name, 'hello.txt');
+  assert.equal(result.data.type, 'file');
+  assert.equal(result.data.size, 51);
+  assert.equal(result.data.contentType, 'text/plain');
+  assert.equal(result.data.path, 'Reports/hello.txt');
+  assert.equal(result.requestId, 'stat-1');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'propfind');
+  assert.equal(calls[0].headers.get('Depth'), '0');
+});
+
+test('missing checks work when an adapter resolves HTTP 404 instead of rejecting', async () => {
+  const spaces = client();
+  spaces.client.defaults.adapter = async config => ({ config, status: 404, statusText: 'Not Found', headers: { 'x-request-id': 'resolved-404' }, data: Buffer.from('missing') });
+  for (const result of [await spaces.file.exists('missing'), await spaces.folder.exists('missing')]) {
+    assert.equal(result.success, true);
+    assert.deepEqual(result.data, { exists: false, resource: null });
+    assert.equal(result.status, 404);
+    assert.equal(result.requestId, 'resolved-404');
+  }
+  const stat = await spaces.file.stat('missing');
+  assert.equal(stat.success, false);
+  assert.equal(stat.error.code, 'NOT_FOUND');
+  assert.equal((await spaces.file.delete('missing')).error.code, 'NOT_FOUND');
+});
+
+test('network failures are not negative existence checks', async () => {
+  const spaces = client();
+  spaces.client.defaults.adapter = async config => {
+    throw new axios.AxiosError('Disconnected', 'ERR_NETWORK', config);
+  };
+  for (const result of [await spaces.file.exists('file'), await spaces.folder.exists('folder'), await spaces.file.stat('file')]) {
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'NETWORK_ERROR');
+    assert.equal(result.status, null);
+  }
+});
+
+test('stat and delete report missing resources as NOT_FOUND failures', async () => {
+  const spaces = client();
+  mock(spaces, 404, 'missing', { 'x-request-id': 'missing-1' });
+  for (const operation of [() => spaces.file.stat('missing'), () => spaces.file.delete('missing'), () => spaces.folder.delete('missing')]) {
+    const result = await operation();
+    assert.equal(result.success, false);
+    assert.equal(result.data, null);
+    assert.equal(result.error.code, 'NOT_FOUND');
+    assert.equal(result.status, 404);
+    assert.equal(result.requestId, 'missing-1');
+  }
+  mock(spaces, 207, multistatus('<d:response><d:href>/missing</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>'));
+  const result = await spaces.file.stat('missing');
+  assert.equal(result.success, false);
+  assert.equal(result.error.code, 'NOT_FOUND');
+  assert.equal(result.status, 207);
+});
+
+test('stat rejects folder targets and preserves lookup failures and warnings', async () => {
+  const spaces = client();
+  mock(spaces, 207, multistatus(entry('/folder', { folder: true })));
+  const mismatch = await spaces.file.stat('folder');
+  assert.equal(mismatch.success, false);
+  assert.equal(mismatch.error.code, 'RESOURCE_TYPE_MISMATCH');
+  assert.deepEqual(mismatch.error.details, { expected: 'file', actual: 'folder' });
+  for (const [status, code] of [[401, 'UNAUTHORIZED'], [403, 'FORBIDDEN'], [500, 'SERVER_ERROR']]) {
+    mock(spaces, status);
+    for (const result of [await spaces.file.stat('file'), await spaces.file.exists('file'), await spaces.folder.exists('folder')]) {
+      assert.equal(result.success, false);
+      assert.equal(result.error.code, code);
+    }
+  }
+  mock(spaces, 207, multistatus(entry('/file', { extraGroups: '<d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>' })));
+  const result = await spaces.file.stat('file');
+  assert.equal(result.success, true);
+  assert.ok(result.warnings.some(warning => warning.code === 'PROPERTY_UNAVAILABLE'));
 });
 
 test('unrecognized, ambiguous and incomplete existence bodies fail explicitly', async () => {
